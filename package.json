@@ -1,0 +1,15 @@
+{
+  "name": "brainsort",
+  "version": "0.1.0",
+  "description": "Brain dump app for ADHD",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

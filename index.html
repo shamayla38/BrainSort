@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BrainSort</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,700;1,400&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="./src/styles.css" />
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script>
+      const { useEffect, useRef, useState } = React;
+      const e = React.createElement;
+
+      const STORAGE_KEY   = 'brainsortStateV2';
+      const SETTINGS_KEY  = 'brainsortSettings';
+      const tabs = ['Home', 'Chat', 'To-dos', 'Journal'];
+
+      const taskKeywords = [
+        'need to', 'have to', 'should', 'email', 'call',
+        'buy', 'finish', 'apply', 'clean', 'study', 'submit',
+      ];
+
+      const feelingPattern = /\b(feel|feeling|felt|stressed|stress|anxious|anxiety|tired|overwhelmed|scared|worried|sad|happy|excited|nervous|sick|bad|good|okay|rough|hard|difficult|struggling|drained|awful|great|fine|exhausted|depressed|hopeful|proud|angry|frustrated|annoyed|terrified|upset|miserable|relieved|calm|lost|confused|burned out|burnt out)\b/i;
+
+      const BOTH_VARIATIONS = [
+        "okay I got all of that. your to-do list is ready whenever you are. how are you feeling about everything? we can build your journal entry together if you want.",
+        "got it all down. your to-do list is sorted — go check it when you're ready. also, how are you doing? we can put something in your journal too if you want to get into it.",
+        "noted everything. to-do list is ready for you. how are you holding up with all of this? we can expand on that for your journal entry.",
+        "okay that's a lot but I've got it all sorted. your to-do list is waiting. how are you feeling right now? tell me more and we can turn it into a journal entry.",
+        "all sorted. your to-do list is ready — have a look and tell me if anything's missing. and how are you actually doing today? we can journal it out if you want.",
+        "got everything down. to-do list is ready when you are. want to talk about how you're feeling? we can put together a journal entry too.",
+      ];
+
+      const FEELINGS_FOLLOWUPS = [
+        "that sounds like a lot. how long have you been feeling this way?",
+        "I hear you. what's been the hardest part?",
+        "that makes sense. want to talk more about it?",
+        "sounds tough. is there anything specific that's been triggering it?",
+      ];
+
+      function pickRandom(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+
+      function detectInputType(inputText) {
+        return {
+          hasFeelings: feelingPattern.test(inputText),
+          hasTasks: taskKeywords.some((kw) => inputText.toLowerCase().includes(kw)),
+        };
+      }
+
+      const greetings = [
+        "what's on your plate today and how are you feeling about it?",
+        "what's today looking like? and how are you feeling about it?",
+        "tell me about your day, what's happening and how are you feeling about it all?",
+        "walk me through your day and how you're feeling right now.",
+        "what do you need to get done today and what's going on with you?",
+        "okay tell me everything, what's on your list and how are you feeling?",
+        "what are you dealing with today? tasks, feelings, all of it.",
+        "hey Shamayla, what's the plan today and how are you really doing?",
+      ];
+
+      const openingMessage = {
+        id: 'opening-message',
+        sender: 'assistant',
+        kind: 'greeting',
+        text: greetings[Math.floor(Math.random() * greetings.length)],
+      };
+
+      // ── Helpers ──────────────────────────────────────────────────────
+
+      function createId() {
+        if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+        return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      }
+
+      function createInitialState() {
+        return { activeTab: 'Home', messages: [openingMessage], dumps: [], tasks: [], journalEntries: [] };
+      }
+
+      function loadState() {
+        try {
+          const saved = localStorage.getItem(STORAGE_KEY);
+          if (saved) return { ...createInitialState(), ...JSON.parse(saved), activeTab: 'Home' };
+        } catch (_) {}
+        return createInitialState();
+      }
+
+      function loadSettings() {
+        try {
+          const saved = localStorage.getItem(SETTINGS_KEY);
+          return saved ? JSON.parse(saved) : { provider: 'claude', claudeKey: '', openaiKey: '' };
+        } catch (_) {
+          return { provider: 'claude', claudeKey: '', openaiKey: '' };
+        }
+      }
+
+      function splitThoughts(input) {
+        return input.split(/[.!?\n,;]+/).map((p) => p.trim()).filter(Boolean);
+      }
+
+      function toTaskTitle(text) {
+        const cleaned = text.replace(/^(i\s+)?(really\s+)?(need to|have to|should)\s+/i, '').trim();
+        return cleaned ? cleaned.charAt(0).toUpperCase() + cleaned.slice(1) : text;
+      }
+
+      function inferMood(input) {
+        const lower = input.toLowerCase();
+        if (/overwhelmed|stressed|anxious|panic|too much|behind/.test(lower)) return { mood: 'overwhelmed', emoji: '🌧️' };
+        if (/sad|tired|exhausted|burned out|burnt out|drained|sick/.test(lower))  return { mood: 'tired',       emoji: '🌙' };
+        if (/excited|happy|proud|good|hopeful|productive/.test(lower))            return { mood: 'hopeful',     emoji: '🌤️' };
+        if (/angry|frustrated|annoyed/.test(lower))                               return { mood: 'frustrated',  emoji: '🌿' };
+        return { mood: 'reflective', emoji: '☕' };
+      }
+
+      // Mock organizer (fallback when no API key set)
+      function mockOrganize(inputText) {
+        const dumpId = createId();
+        const createdAt = new Date().toISOString();
+        const parts = splitThoughts(inputText);
+        const { hasFeelings, hasTasks } = detectInputType(inputText);
+
+        const keywordMatches = parts.filter((p) => taskKeywords.some((kw) => p.toLowerCase().includes(kw)));
+        let taskTitles = keywordMatches.map(toTaskTitle);
+        if (taskTitles.length < 3) {
+          taskTitles = taskTitles.concat(parts.filter((p) => !keywordMatches.includes(p)).slice(0, 6 - taskTitles.length).map(toTaskTitle));
+        }
+        taskTitles = taskTitles.filter(Boolean).filter((t, i, a) => a.indexOf(t) === i).slice(0, 6);
+        if (taskTitles.length === 0) taskTitles = ['Choose one small thing to start with'];
+
+        const tasks = taskTitles.map((title) => ({ id: createId(), title, completed: false, createdAt, sourceDumpId: dumpId }));
+        const moodInfo = inferMood(inputText);
+        const taskList = tasks.slice(0, 4).map((t) => t.title.toLowerCase()).join(', ');
+        const journalEntry = {
+          id: createId(), sourceDumpId: dumpId,
+          mood: moodInfo.mood, emoji: moodInfo.emoji, createdAt,
+          body: `${taskList ? `need to ${taskList}.` : 'a lot on my mind.'} feeling ${moodInfo.mood}.`,
+        };
+
+        let assistantMessage;
+        if (hasTasks && hasFeelings) {
+          assistantMessage = pickRandom(BOTH_VARIATIONS);
+        } else if (hasTasks) {
+          assistantMessage = "got all of that sorted. your to-do list is ready — have a look. how are you feeling about everything?";
+        } else {
+          assistantMessage = pickRandom(FEELINGS_FOLLOWUPS);
+        }
+
+        return {
+          dump: { id: dumpId, rawText: inputText, createdAt, tasks, journalEntry },
+          tasks, journalEntry,
+          assistantMessage,
+          gentleQuestions: [],
+        };
+      }
+
+      // Converts raw AI JSON response into our internal data shape
+      function buildFromAI(aiData, rawText) {
+        const dumpId = createId();
+        const createdAt = new Date().toISOString();
+        const tasks = (aiData.tasks || []).map((title) => ({ id: createId(), title, completed: false, createdAt, sourceDumpId: dumpId }));
+        const je = aiData.journalEntry || {};
+        const journalEntry = { id: createId(), sourceDumpId: dumpId, body: je.body || '', mood: je.mood || 'reflective', emoji: je.emoji || '☕', createdAt };
+        return {
+          dump: { id: dumpId, rawText, createdAt, tasks, journalEntry },
+          tasks, journalEntry,
+          assistantMessage: aiData.assistantMessage || 'Here is what I found.',
+          gentleQuestions: aiData.gentleQuestions || [],
+        };
+      }
+
+      async function organizeWithAI(text, settings) {
+        const apiKey = settings.provider === 'openai' ? settings.openaiKey : settings.claudeKey;
+        if (!apiKey) return mockOrganize(text);
+
+        const res = await fetch('/api/organize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, provider: settings.provider, apiKey }),
+        });
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error || 'Server error');
+        }
+
+        const data = await res.json();
+        return buildFromAI(data, text);
+      }
+
+      // ── Date helpers ──────────────────────────────────────────────────
+
+      function formatDayName(iso)  { return new Date(iso).toLocaleDateString(undefined, { weekday: 'long' }); }
+      function formatFullDate(iso) { return new Date(iso).toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' }); }
+      function formatTime(iso)     { return new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', hour12: true }).toLowerCase(); }
+
+      // ── Icons ─────────────────────────────────────────────────────────
+
+      function NavIcon({ tab, active }) {
+        const stroke = active ? '#7b5536' : '#8f7d6d';
+        const p = { width: 22, height: 22, viewBox: '0 0 24 24', fill: 'none', stroke, strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true' };
+        if (tab === 'Home')    return e('svg', p, e('path', { d: 'M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z' }), e('polyline', { points: '9,22 9,12 15,12 15,22' }));
+        if (tab === 'Chat')    return e('svg', p, e('path', { d: 'M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z' }));
+        if (tab === 'To-dos') return e('svg', p, e('polyline', { points: '9,11 12,14 22,4' }), e('path', { d: 'M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11' }));
+        if (tab === 'Journal') return e('svg', p, e('path', { d: 'M4 19.5A2.5 2.5 0 016.5 17H20' }), e('path', { d: 'M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z' }));
+        return null;
+      }
+
+      function SendIcon() {
+        return e('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
+          e('line', { x1: 22, y1: 2, x2: 11, y2: 13 }),
+          e('polygon', { points: '22,2 15,22 11,13 2,9' })
+        );
+      }
+
+      function GearIcon() {
+        return e('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' },
+          e('circle', { cx: 12, cy: 12, r: 3 }),
+          e('path', { d: 'M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z' })
+        );
+      }
+
+      // ── Settings panel ────────────────────────────────────────────────
+
+      function SettingsPanel({ settings, onSave, onClose }) {
+        const [local, setLocal] = useState(settings);
+
+        function save() {
+          localStorage.setItem(SETTINGS_KEY, JSON.stringify(local));
+          onSave(local);
+          onClose();
+        }
+
+        const activeKey = local.provider === 'openai' ? local.openaiKey : local.claudeKey;
+        const keyField  = local.provider === 'openai' ? 'openaiKey' : 'claudeKey';
+        const keyLabel  = local.provider === 'openai' ? 'OpenAI API key' : 'Anthropic API key';
+        const keyHint   = local.provider === 'openai' ? 'sk-...' : 'sk-ant-...';
+
+        return e('div', { className: 'settings-overlay' },
+          e('div', { className: 'settings-panel' },
+            e('div', { className: 'settings-header' },
+              e('h2', null, 'Settings'),
+              e('button', { className: 'icon-button', type: 'button', onClick: onClose, 'aria-label': 'Close' }, '✕')
+            ),
+
+            e('div', { className: 'settings-section' },
+              e('p', { className: 'settings-label' }, 'AI provider'),
+              e('div', { className: 'provider-toggle' },
+                e('button', {
+                  type: 'button',
+                  className: `provider-btn${local.provider === 'claude' ? ' active' : ''}`,
+                  onClick: () => setLocal((s) => ({ ...s, provider: 'claude' })),
+                }, 'Claude'),
+                e('button', {
+                  type: 'button',
+                  className: `provider-btn${local.provider === 'openai' ? ' active' : ''}`,
+                  onClick: () => setLocal((s) => ({ ...s, provider: 'openai' })),
+                }, 'ChatGPT')
+              )
+            ),
+
+            e('div', { className: 'settings-section' },
+              e('label', { className: 'settings-label', htmlFor: 'api-key-input' }, keyLabel),
+              e('input', {
+                id: 'api-key-input',
+                type: 'password',
+                className: 'settings-input',
+                placeholder: keyHint,
+                value: activeKey,
+                onChange: (ev) => setLocal((s) => ({ ...s, [keyField]: ev.target.value })),
+              }),
+              e('p', { className: 'settings-hint' }, 'Stored in your browser only. Never sent anywhere except directly to the AI provider.')
+            ),
+
+            e('button', { className: 'primary-cta', type: 'button', onClick: save }, 'Save'),
+
+            !activeKey && e('p', { className: 'settings-warn' }, 'No key set — BrainSort will use the basic mock organiser until you add one.')
+          )
+        );
+      }
+
+      // ── App ───────────────────────────────────────────────────────────
+
+      function App() {
+        const [state, setState]               = useState(loadState);
+        const [settings, setSettings]         = useState(loadSettings);
+        const [draft, setDraft]               = useState('');
+        const [isLoading, setIsLoading]       = useState(false);
+        const [aiError, setAiError]           = useState(null);
+        const [showSettings, setShowSettings] = useState(false);
+        const [expandedJournals, setExpandedJournals] = useState(new Set());
+        const messagesEndRef = useRef(null);
+
+        useEffect(() => {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify({
+            messages: state.messages, dumps: state.dumps, tasks: state.tasks, journalEntries: state.journalEntries,
+          }));
+        }, [state.messages, state.dumps, state.tasks, state.journalEntries]);
+
+        useEffect(() => {
+          if (messagesEndRef.current) messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+        }, [state.messages, isLoading]);
+
+        function setActiveTab(activeTab) { setState((cur) => ({ ...cur, activeTab })); }
+
+        async function handleSubmit(event) {
+          event.preventDefault();
+          const inputText = draft.trim();
+          if (!inputText || isLoading) return;
+
+          setDraft('');
+          setAiError(null);
+          setIsLoading(true);
+
+          const userMessage = { id: createId(), kind: 'text', sender: 'user', text: inputText };
+          setState((cur) => ({ ...cur, activeTab: 'Chat', messages: [...cur.messages, userMessage] }));
+
+          try {
+            const organized = await organizeWithAI(inputText, settings);
+            setState((cur) => ({
+              ...cur,
+              messages: [...cur.messages, { id: createId(), kind: 'organized', sender: 'assistant', organized }],
+              dumps: [organized.dump, ...cur.dumps],
+              tasks: [...organized.tasks, ...cur.tasks],
+              journalEntries: [organized.journalEntry, ...cur.journalEntries],
+            }));
+          } catch (err) {
+            setAiError('Something went wrong. Check your API key in Settings.');
+          } finally {
+            setIsLoading(false);
+          }
+        }
+
+        function toggleTask(taskId) {
+          setState((cur) => ({ ...cur, tasks: cur.tasks.map((t) => t.id === taskId ? { ...t, completed: !t.completed } : t) }));
+        }
+
+        function clearAll() {
+          localStorage.removeItem(STORAGE_KEY);
+          setDraft('');
+          setAiError(null);
+          setState(createInitialState());
+        }
+
+        // ── Render helpers ──────────────────────────────────────────────
+
+        function renderHome() {
+          return e('div', { className: 'page page--home' },
+            e('div', { className: 'home-hero' },
+              e('h1', { className: 'home-title' }, 'Welcome, Shamayla')
+            ),
+            e('div', { className: 'home-body' },
+              e('p', null, 'Got a lot going on? Just dump it here: tasks, thoughts, feelings, whatever\'s floating around in your head. Do it once a day, or whenever your brain feels full.'),
+              e('p', null, 'I\'ll turn it into a clean to-do list and a journal entry. You just talk, I\'ll handle the rest. Think of BrainSort as that friend who listens to you ramble and somehow pulls out exactly what you need to do, and saves how you were feeling along the way.')
+            ),
+            e('div', { className: 'feature-list' },
+              e('div', { className: 'feature-item' },
+                e('div', { className: 'feature-icon' }, e('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: '#7b5536', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' }, e('path', { d: 'M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z' }))),
+                e('div', null, e('p', { className: 'feature-title' }, 'Brain dump freely'), e('p', { className: 'feature-desc' }, 'No structure needed. Just say what\'s on your mind.'))
+              ),
+              e('div', { className: 'feature-item' },
+                e('div', { className: 'feature-icon' }, e('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: '#7b5536', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' }, e('polyline', { points: '9,11 12,14 22,4' }), e('path', { d: 'M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11' }))),
+                e('div', null, e('p', { className: 'feature-title' }, 'Auto to-do list'), e('p', { className: 'feature-desc' }, 'I pull out the action items so you don\'t have to.'))
+              ),
+              e('div', { className: 'feature-item' },
+                e('div', { className: 'feature-icon' }, e('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: '#7b5536', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' }, e('path', { d: 'M4 19.5A2.5 2.5 0 016.5 17H20' }), e('path', { d: 'M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z' }))),
+                e('div', null, e('p', { className: 'feature-title' }, 'Journal written for you'), e('p', { className: 'feature-desc' }, 'Feelings and experiences turned into a proper entry.'))
+              )
+            ),
+            e('div', { className: 'home-cta-area' },
+              e('button', { className: 'primary-cta', type: 'button', onClick: () => setActiveTab('Chat') }, 'Dump your thoughts ', e('span', { 'aria-hidden': 'true' }, '→')),
+              e('p', { className: 'cta-note' }, "It's okay if it's a lot. That's the point.")
+            )
+          );
+        }
+
+        function renderGreeting(msg) {
+          return e('article', { className: 'message message--assistant', key: msg.id }, msg.text);
+        }
+
+        function renderOrganized(msg) {
+          return e('article', { className: 'message message--assistant', key: msg.id }, msg.organized.assistantMessage);
+        }
+
+        function renderMessage(msg) {
+          if (msg.kind === 'greeting')  return renderGreeting(msg);
+          if (msg.kind === 'organized') return renderOrganized(msg);
+          return e('article', { className: `message message--${msg.sender}`, key: msg.id }, msg.text);
+        }
+
+        function renderChat() {
+          const hasKey = settings.provider === 'openai' ? !!settings.openaiKey : !!settings.claudeKey;
+          return e('div', { className: 'page page--chat' },
+            e('header', { className: 'chat-header' },
+              e('div', null,
+                e('p', { className: 'chat-app-name' }, 'BrainSort'),
+                e('p', { className: 'chat-subtitle' }, 'dump your thoughts, I\'ll sort them out')
+              ),
+              e('div', { className: 'chat-header-actions' },
+                !hasKey && e('span', { className: 'no-key-badge', title: 'Add an API key in Settings to enable AI' }, 'Mock mode'),
+                e('button', { className: 'icon-button', type: 'button', onClick: () => setShowSettings(true), 'aria-label': 'Settings' }, e(GearIcon)),
+                e('button', { className: 'clear-button', type: 'button', onClick: clearAll }, 'Clear')
+              )
+            ),
+            e('div', { className: 'messages', 'aria-live': 'polite' },
+              state.messages.map(renderMessage),
+              isLoading && e('div', { className: 'typing-indicator' },
+                e('span'), e('span'), e('span')
+              ),
+              aiError && e('p', { className: 'ai-error' }, aiError),
+              e('div', { ref: messagesEndRef })
+            ),
+            e('form', { className: 'composer', onSubmit: handleSubmit },
+              e('label', { className: 'sr-only', htmlFor: 'brain-dump-input' }, 'Type your thoughts'),
+              e('input', {
+                id: 'brain-dump-input',
+                type: 'text',
+                placeholder: "What's on your mind...",
+                value: draft,
+                disabled: isLoading,
+                onChange: (ev) => setDraft(ev.target.value),
+              }),
+              e('button', { type: 'submit', className: 'send-button', 'aria-label': 'Send', disabled: isLoading }, e(SendIcon))
+            )
+          );
+        }
+
+        function renderTodos() {
+          const remaining = state.tasks.filter((t) => !t.completed).length;
+          return e('div', { className: 'page' },
+            e('div', { className: 'page-top' },
+              e('h1', { className: 'page-title' }, 'To-dos'),
+              e('p', { className: 'page-subtitle' }, state.tasks.length === 0 ? 'Nothing here yet' : `${remaining} thing${remaining !== 1 ? 's' : ''} to do`)
+            ),
+            state.tasks.length === 0
+              ? e('p', { className: 'empty-state' }, 'Send a brain dump in Chat and your tasks will appear here.')
+              : e('div', { className: 'todo-list' },
+                  state.tasks.map((task) =>
+                    e('label', { key: task.id, className: `todo-card${task.completed ? ' is-complete' : ''}` },
+                      e('input', { type: 'checkbox', className: 'todo-checkbox', checked: task.completed, onChange: () => toggleTask(task.id) }),
+                      e('span', { className: 'todo-title' }, task.title)
+                    )
+                  )
+                )
+          );
+        }
+
+        function renderJournal() {
+          const entries = state.journalEntries;
+
+          function toggleEntry(id) {
+            setExpandedJournals((prev) => {
+              const next = new Set(prev);
+              if (next.has(id)) { next.delete(id); } else { next.add(id); }
+              return next;
+            });
+          }
+
+          function preview(text) {
+            const limit = 110;
+            return text.length <= limit ? text : text.slice(0, limit).trimEnd() + '...';
+          }
+
+          function ChevronIcon({ open }) {
+            return e('svg', {
+              width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none',
+              stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round',
+              className: `journal-chevron${open ? ' is-open' : ''}`,
+            }, e('polyline', { points: '6,9 12,15 18,9' }));
+          }
+
+          return e('div', { className: 'page' },
+            e('div', { className: 'page-top' },
+              e('h1', { className: 'page-title' }, 'Journal'),
+              e('p', { className: 'page-subtitle' }, 'your feelings & reflections, captured')
+            ),
+            entries.length === 0
+              ? e('p', { className: 'empty-state' }, 'One brain dump will create one calm entry here.')
+              : e('div', { className: 'journal-list' },
+                  entries.map((entry, index) => {
+                    const entryNum = entries.length - index;
+                    const isOpen   = expandedJournals.has(entry.id);
+                    return e('article', {
+                      key: entry.id,
+                      className: `journal-card${isOpen ? ' is-expanded' : ''}`,
+                      onClick: () => toggleEntry(entry.id),
+                      role: 'button',
+                      tabIndex: 0,
+                      onKeyDown: (ev) => { if (ev.key === 'Enter' || ev.key === ' ') toggleEntry(entry.id); },
+                    },
+                      e('div', { className: 'journal-card-top' },
+                        e('div', null,
+                          e('p', { className: 'journal-day' }, formatDayName(entry.createdAt)),
+                          e('p', { className: 'journal-date' }, formatFullDate(entry.createdAt))
+                        ),
+                        e('div', { className: 'journal-entry-block' },
+                          e('p', { className: 'journal-entry-num' }, `Entry #${entryNum}`),
+                          e(ChevronIcon, { open: isOpen })
+                        )
+                      ),
+                      e('p', { className: 'journal-body-text' }, isOpen ? entry.body : preview(entry.body)),
+                      e('p', { className: 'journal-time' }, formatTime(entry.createdAt))
+                    );
+                  })
+                )
+          );
+        }
+
+        const pages = { Home: renderHome, Chat: renderChat, 'To-dos': renderTodos, Journal: renderJournal };
+
+        return e('main', { className: 'app-shell' },
+          e('section', { className: 'app-card' },
+            e('div', { className: 'content-area' }, pages[state.activeTab]()),
+            e('nav', { className: 'bottom-nav', 'aria-label': 'Main navigation' },
+              tabs.map((tab) =>
+                e('button', {
+                  key: tab, type: 'button',
+                  className: `nav-btn${state.activeTab === tab ? ' active' : ''}`,
+                  onClick: () => setActiveTab(tab),
+                },
+                  e(NavIcon, { tab, active: state.activeTab === tab }),
+                  e('span', null, tab)
+                )
+              )
+            )
+          ),
+          showSettings && e(SettingsPanel, {
+            settings,
+            onSave: setSettings,
+            onClose: () => setShowSettings(false),
+          })
+        );
+      }
+
+      ReactDOM.createRoot(document.getElementById('root')).render(e(App));
+    </script>
+  </body>
+</html>
